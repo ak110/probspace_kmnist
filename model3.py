@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""モデルその1。"""
+"""モデルその2。"""
 import argparse
+import functools
 import pathlib
 
 import numpy as np
@@ -12,7 +13,7 @@ import pytoolkit as tk
 logger = tk.log.get(__name__)
 
 CV_COUNT = 5
-SPLIT_SEED = 123
+SPLIT_SEED = 789
 NUM_CLASSES = 10
 INPUT_SHAPE = (28, 28, 1)
 BATCH_SIZE = 128
@@ -184,14 +185,56 @@ def _load_test_data():
 
 def create_model():
     """モデルの作成。"""
-    inputs = x = tk.keras.layers.Input((None, None, 1))
-    x = tk.layers.Preprocess(mode="tf")(x)
-    x = _conv2d(128)(x)  # 28
-    x = _blocks(128, 4)(x)
-    x = _down(256, use_act=False)(x)  # 14
-    x = _blocks(256, 4)(x)
-    x = _down(512, use_act=False)(x)  # 7
-    x = _blocks(512, 4)(x)
+    conv2d = functools.partial(tk.layers.WSConv2D, kernel_size=3)
+    bn = functools.partial(
+        tk.keras.layers.BatchNormalization,
+        gamma_regularizer=tk.keras.regularizers.l2(1e-4),
+    )
+    act = functools.partial(tk.keras.layers.Activation, "relu")
+
+    def down(filters):
+        def layers(x):
+            g = tk.keras.layers.Conv2D(
+                1,
+                3,
+                padding="same",
+                activation="sigmoid",
+                kernel_regularizer=tk.keras.regularizers.l2(1e-4),
+            )(x)
+            x = tk.keras.layers.multiply([x, g])
+            x = tk.keras.layers.MaxPooling2D(2, strides=1, padding="same")(x)
+            x = tk.layers.BlurPooling2D(taps=4)(x)
+            x = conv2d(filters)(x)
+            x = bn()(x)
+            return x
+
+        return layers
+
+    def blocks(filters, count):
+        def layers(x):
+            for _ in range(count):
+                sc = x
+                x = conv2d(filters)(x)
+                x = bn()(x)
+                x = act()(x)
+                x = conv2d(filters)(x)
+                # resblockのadd前だけgammaの初期値を0にする。 <https://arxiv.org/abs/1812.01187>
+                x = bn(gamma_initializer="zeros")(x)
+                x = tk.keras.layers.add([sc, x])
+            x = bn()(x)
+            x = act()(x)
+            return x
+
+        return layers
+
+    inputs = x = tk.keras.layers.Input(INPUT_SHAPE)
+    x = conv2d(128)(x)  # 1/1
+    x = bn()(x)
+    x = blocks(128, 4)(x)
+    x = down(256)(x)  # 1/2
+    x = blocks(256, 4)(x)
+    x = down(512)(x)  # 1/4
+    x = blocks(512, 4)(x)
     x = tk.keras.layers.GlobalAveragePooling2D()(x)
     x = tk.keras.layers.Dense(
         NUM_CLASSES,
@@ -203,64 +246,6 @@ def create_model():
     optimizer = tk.keras.optimizers.SGD(lr=base_lr, momentum=0.9, nesterov=True)
     tk.models.compile(model, optimizer, "categorical_crossentropy", ["acc"])
     return model
-
-
-def _down(filters, use_act=True):
-    def layers(x):
-        g = tk.keras.layers.Conv2D(
-            1,
-            3,
-            padding="same",
-            activation="sigmoid",
-            kernel_regularizer=tk.keras.regularizers.l2(1e-4),
-        )(x)
-        x = tk.keras.layers.multiply([x, g])
-        x = _conv2d(filters, strides=2, use_act=use_act)(x)
-        return x
-
-    return layers
-
-
-def _blocks(filters, count):
-    def layers(x):
-        for _ in range(count):
-            sc = x
-            x = _conv2d(filters, use_act=True)(x)
-            x = _conv2d(filters, use_act=False)(x)
-            x = tk.keras.layers.add([sc, x])
-        x = _bn_act()(x)
-        return x
-
-    return layers
-
-
-def _conv2d(filters, kernel_size=3, strides=1, use_act=True):
-    def layers(x):
-        x = tk.keras.layers.Conv2D(
-            filters,
-            kernel_size=kernel_size,
-            strides=strides,
-            padding="same",
-            use_bias=False,
-            kernel_initializer="he_uniform",
-            kernel_regularizer=tk.keras.regularizers.l2(1e-4),
-        )(x)
-        x = _bn_act(use_act=use_act)(x)
-        return x
-
-    return layers
-
-
-def _bn_act(use_act=True):
-    def layers(x):
-        x = tk.keras.layers.BatchNormalization(
-            gamma_regularizer=tk.keras.regularizers.l2(1e-4)
-        )(x)
-        x = tk.layers.MixFeat()(x)
-        x = tk.keras.layers.Activation("relu")(x) if use_act else x
-        return x
-
-    return layers
 
 
 class MyDataset(tk.data.Dataset):
@@ -290,11 +275,12 @@ class MyDataset(tk.data.Dataset):
                             tk.image.RandomAlpha(p=0.125),
                         ]
                     ),
-                    tk.image.RandomErasing(),
                 ]
             )
+            self.aug2 = tk.image.RandomErasing()
         else:
             self.aug = tk.image.Resize(width=input_shape[1], height=input_shape[0])
+            self.aug2 = None
 
     def __len__(self):
         return len(self.X)
@@ -304,8 +290,10 @@ class MyDataset(tk.data.Dataset):
             sample1 = self.get_sample(index)
             sample2 = self.get_sample(np.random.choice(len(self)))
             X, y = tk.ndimage.mixup(sample1, sample2)
+            X = self.aug2(image=X)["image"]
         else:
             X, y = self.get_sample(index)
+        X = tk.ndimage.preprocess_tf(X)
         return X, y
 
     def get_sample(self, index):
