@@ -2,6 +2,8 @@
 
 <https://prob.space/competitions/kuzushiji-mnist>
 
+<https://prob.space/competitions/kuzushiji-mnist/discussions/ak1100-Post7feac3a17f875c9e04dd>
+
 ## やったこと
 
 ちょっとずつパラメータを変えた3種類のモデル×各5foldでTTA(9 crops)して平均しただけ。
